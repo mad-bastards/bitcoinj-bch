@@ -1,6 +1,7 @@
 /*
  * Copyright 2013 Google Inc.
  * Copyright 2015 Andreas Schildbach
+ * Copyright 2018 the bitcoinj-cash developers
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,29 +14,24 @@
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
+ *
+ * This file has been modified by the bitcoinj-cash developers for the bitcoinj-cash project.
+ * The original file was from the bitcoinj project (https://github.com/bitcoinj/bitcoinj).
  */
 
 package org.bitcoinj.params;
 
-import java.math.BigInteger;
-import java.util.concurrent.TimeUnit;
-
-import org.bitcoinj.core.Block;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.StoredBlock;
-import org.bitcoinj.core.Transaction;
-import org.bitcoinj.core.Utils;
-import org.bitcoinj.utils.MonetaryFormat;
-import org.bitcoinj.core.VerificationException;
+import com.google.common.base.Preconditions;
+import com.google.common.base.Stopwatch;
+import org.bitcoinj.core.*;
 import org.bitcoinj.store.BlockStore;
 import org.bitcoinj.store.BlockStoreException;
+import org.bitcoinj.utils.MonetaryFormat;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Stopwatch;
-
-import org.bitcoinj.core.BitcoinSerializer;
+import java.math.BigInteger;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Parameters for Bitcoin-like networks.
@@ -44,7 +40,7 @@ public abstract class AbstractBitcoinNetParams extends NetworkParameters {
     /**
      * Scheme part for Bitcoin URIs.
      */
-    public static final String BITCOIN_SCHEME = "bitcoin";
+    public static final String BITCOIN_SCHEME = "bitcoincash";
 
     private static final Logger log = LoggerFactory.getLogger(AbstractBitcoinNetParams.class);
 
@@ -52,76 +48,86 @@ public abstract class AbstractBitcoinNetParams extends NetworkParameters {
         super();
     }
 
-    /** 
-     * Checks if we are at a difficulty transition point. 
-     * @param storedPrev The previous stored block 
-     * @return If this is a difficulty transition point 
+    /**
+     * Checks if we are at a difficulty transition point.
+     * @param storedPrev The previous stored block
+     * @param parameters The network parameters
+     * @return If this is a difficulty transition point
      */
-    protected boolean isDifficultyTransitionPoint(StoredBlock storedPrev) {
-        return ((storedPrev.getHeight() + 1) % this.getInterval()) == 0;
+    public static boolean isDifficultyTransitionPoint(StoredBlock storedPrev, NetworkParameters parameters) {
+        return ((storedPrev.getHeight() + 1) % parameters.getInterval()) == 0;
     }
 
-    @Override
-    public void checkDifficultyTransitions(final StoredBlock storedPrev, final Block nextBlock,
-    	final BlockStore blockStore) throws VerificationException, BlockStoreException {
-        Block prev = storedPrev.getHeader();
+    /**
+     * determines whether monolith upgrade is activated based on MTP
+     * @param storedPrev The previous stored block
+     * @param store BlockStore containing at least 11 blocks
+     * @param parameters The network parameters
+     * @return
+     */
+    public static boolean isMonolithEnabled(StoredBlock storedPrev, BlockStore store, NetworkParameters parameters) {
+        if (storedPrev.getHeight() < 524626) { //current height at time of writing, well below the activation block height
+            return false;
+        }
+        try {
+            long mtp = BlockChain.getMedianTimestampOfRecentBlocks(storedPrev, store);
+            return isMonolithEnabled(mtp, parameters);
+        } catch (BlockStoreException e) {
+            throw new RuntimeException("Cannot determine monolith activation without BlockStore");
+        }
+    }
 
-        // Is this supposed to be a difficulty transition point?
-        if (!isDifficultyTransitionPoint(storedPrev)) {
+    /**
+     * determines whether monolith upgrade is activated based on the given MTP.  Useful for overriding MTP for testing.
+     * @param medianTimePast
+     * @param parameters The network parameters
+     * @return
+     */
+    public static boolean isMonolithEnabled(long medianTimePast, NetworkParameters parameters) {
+        return medianTimePast >= parameters.getMonolithActivationTime();
+    }
 
-            // No ... so check the difficulty didn't actually change.
-            if (nextBlock.getDifficultyTarget() != prev.getDifficultyTarget())
-                throw new VerificationException("Unexpected change in difficulty at height " + storedPrev.getHeight() +
-                        ": " + Long.toHexString(nextBlock.getDifficultyTarget()) + " vs " +
-                        Long.toHexString(prev.getDifficultyTarget()));
-            return;
+    /**
+     * The number that is one greater than the largest representable SHA-256
+     * hash.
+     */
+    private static BigInteger LARGEST_HASH = BigInteger.ONE.shiftLeft(256);
+
+    /**
+     * Compute the a target based on the work done between 2 blocks and the time
+     * required to produce that work.
+     */
+     public static BigInteger ComputeTarget(StoredBlock pindexFirst,
+                                   StoredBlock pindexLast) {
+
+         Preconditions.checkState(pindexLast.getHeight() > pindexFirst.getHeight());
+
+        /*
+         * From the total work done and the time it took to produce that much work,
+         * we can deduce how much work we expect to be produced in the targeted time
+         * between blocks.
+         */
+        BigInteger work = pindexLast.getChainWork().subtract(pindexFirst.getChainWork());
+        work = work.multiply(BigInteger.valueOf(TARGET_SPACING));
+
+        // In order to avoid difficulty cliffs, we bound the amplitude of the
+        // adjustement we are going to do.
+        //assert(pindexLast->nTime > pindexFirst->nTime);
+        long nActualTimespan = pindexLast.getHeader().getTimeSeconds() - pindexFirst.getHeader().getTimeSeconds();
+        if (nActualTimespan > 288 * TARGET_SPACING) {
+            nActualTimespan = 288 * TARGET_SPACING;
+        } else if (nActualTimespan < 72 * TARGET_SPACING) {
+            nActualTimespan = 72 * TARGET_SPACING;
         }
 
-        // We need to find a block far back in the chain. It's OK that this is expensive because it only occurs every
-        // two weeks after the initial block chain download.
-        final Stopwatch watch = Stopwatch.createStarted();
-        StoredBlock cursor = blockStore.get(prev.getHash());
-        for (int i = 0; i < this.getInterval() - 1; i++) {
-            if (cursor == null) {
-                // This should never happen. If it does, it means we are following an incorrect or busted chain.
-                throw new VerificationException(
-                        "Difficulty transition point but we did not find a way back to the genesis block.");
-            }
-            cursor = blockStore.get(cursor.getHeader().getPrevBlockHash());
-        }
-        watch.stop();
-        if (watch.elapsed(TimeUnit.MILLISECONDS) > 50)
-            log.info("Difficulty transition traversal took {}", watch);
+        work = work.divide(BigInteger.valueOf(nActualTimespan));
 
-        Block blockIntervalAgo = cursor.getHeader();
-        int timespan = (int) (prev.getTimeSeconds() - blockIntervalAgo.getTimeSeconds());
-        // Limit the adjustment step.
-        final int targetTimespan = this.getTargetTimespan();
-        if (timespan < targetTimespan / 4)
-            timespan = targetTimespan / 4;
-        if (timespan > targetTimespan * 4)
-            timespan = targetTimespan * 4;
-
-        BigInteger newTarget = Utils.decodeCompactBits(prev.getDifficultyTarget());
-        newTarget = newTarget.multiply(BigInteger.valueOf(timespan));
-        newTarget = newTarget.divide(BigInteger.valueOf(targetTimespan));
-
-        if (newTarget.compareTo(this.getMaxTarget()) > 0) {
-            log.info("Difficulty hit proof of work limit: {}", newTarget.toString(16));
-            newTarget = this.getMaxTarget();
-        }
-
-        int accuracyBytes = (int) (nextBlock.getDifficultyTarget() >>> 24) - 3;
-        long receivedTargetCompact = nextBlock.getDifficultyTarget();
-
-        // The calculated difficulty is to a higher precision than received, so reduce here.
-        BigInteger mask = BigInteger.valueOf(0xFFFFFFL).shiftLeft(accuracyBytes * 8);
-        newTarget = newTarget.and(mask);
-        long newTargetCompact = Utils.encodeCompactBits(newTarget);
-
-        if (newTargetCompact != receivedTargetCompact)
-            throw new VerificationException("Network provided difficulty bits do not match what was calculated: " +
-                    Long.toHexString(newTargetCompact) + " vs " + Long.toHexString(receivedTargetCompact));
+        /*
+         * We need to compute T = (2^256 / W) - 1 but 2^256 doesn't fit in 256 bits.
+         * By expressing 1 as W / W, we get (2^256 - W) / W, and we can compute
+         * 2^256 - W as the complement of W.
+         */
+         return LARGEST_HASH.divide(work).subtract(BigInteger.ONE);//target.add(BigInteger.ONE))
     }
 
     @Override

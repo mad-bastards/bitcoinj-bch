@@ -24,13 +24,7 @@ import java.math.BigInteger;
 import java.util.Date;
 
 import org.bitcoin.protocols.payments.Protos.PaymentDetails;
-import org.bitcoinj.core.Address;
-import org.bitcoinj.core.Coin;
-import org.bitcoinj.core.Context;
-import org.bitcoinj.core.ECKey;
-import org.bitcoinj.core.NetworkParameters;
-import org.bitcoinj.core.Transaction;
-import org.bitcoinj.core.TransactionOutput;
+import org.bitcoinj.core.*;
 import org.bitcoinj.script.Script;
 import org.bitcoinj.script.ScriptBuilder;
 import org.bitcoinj.utils.ExchangeRate;
@@ -58,7 +52,7 @@ public class SendRequest {
      *
      * <p>If there are already inputs to the transaction, make sure their out point has a connected output,
      * otherwise their value will be added to fee.  Also ensure they are either signed or are spendable by a wallet
-     * key, otherwise the behavior of {@link Wallet#completeTx(Wallet.SendRequest)} is undefined (likely
+     * key, otherwise the behavior of {@link Wallet#completeTx(SendRequest)} is undefined (likely
      * RuntimeException).</p>
      */
     public Transaction tx;
@@ -264,4 +258,17 @@ public class SendRequest {
         helper.add("shuffleOutputs", shuffleOutputs);
         return helper.toString();
     }
+    /** Use Version 2 Transactions with forkid signatures **/
+    private boolean useForkId = false;
+
+    public void setUseForkId(boolean useForkId)
+    {
+        this.useForkId = useForkId;
+        if(tx != null)
+            tx.setVersion(Transaction.CURRENT_VERSION);
+    }
+
+    public boolean getUseForkId() { return useForkId; }
+
+
 }

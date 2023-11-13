@@ -116,7 +116,7 @@ public class PaymentChannelV1ClientState extends PaymentChannelClientState {
      * Creates the initial multisig contract and incomplete refund transaction which can be requested at the appropriate
      * time using {@link PaymentChannelV1ClientState#getIncompleteRefundTransaction} and
      * {@link PaymentChannelV1ClientState#getContract()}. The way the contract is crafted can be adjusted by
-     * overriding {@link PaymentChannelV1ClientState#editContractSendRequest(org.bitcoinj.core.Wallet.SendRequest)}.
+     * overriding {@link PaymentChannelV1ClientState#editContractSendRequest(org.bitcoinj.wallet.SendRequest)}.
      * By default unconfirmed coins are allowed to be used, as for micropayments the risk should be relatively low.
      * @param userKey Key derived from a user password, needed for any signing when the wallet is encrypted.
      *                  The wallet KeyCrypter is assumed.
@@ -138,6 +138,7 @@ public class PaymentChannelV1ClientState extends PaymentChannelClientState {
         if (multisigOutput.isDust())
             throw new ValueOutOfRangeException("totalValue too small to use");
         SendRequest req = SendRequest.forTx(template);
+        req.setUseForkId(true);
         req.coinSelector = AllowUnconfirmedCoinSelector.get();
         editContractSendRequest(req);
         req.shuffleOutputs = false;   // TODO: Fix things so shuffling is usable.
@@ -238,7 +239,9 @@ public class PaymentChannelV1ClientState extends PaymentChannelClientState {
         } catch (ScriptException e) {
             throw new RuntimeException(e);  // Cannot happen: we built this ourselves.
         }
-        TransactionSignature ourSignature =
+        TransactionSignature ourSignature = refundTx.getVersion() >= Transaction.FORKID_VERSION ?
+                refundTx.calculateWitnessSignature(0, myKey.maybeDecrypt(userKey),
+                        multisigScript, refundTx.getInput(0).getConnectedOutput().getValue(), Transaction.SigHash.ALL, false) :
                 refundTx.calculateSignature(0, myKey.maybeDecrypt(userKey),
                         multisigScript, Transaction.SigHash.ALL, false);
         // Insert the signatures.

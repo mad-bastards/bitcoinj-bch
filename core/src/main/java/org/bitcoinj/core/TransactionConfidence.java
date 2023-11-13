@@ -217,7 +217,7 @@ public class TransactionConfidence {
      * <p>Note that this is NOT called when every block arrives. Instead it is called when the transaction
      * transitions between confidence states, ie, from not being seen in the chain to being seen (not necessarily in
      * the best chain). If you want to know when the transaction gets buried under another block, implement a
-     * {@link BlockChainListener}, attach it to a {@link BlockChain} and then use the getters on the
+     * {@link org.bitcoinj.core.listeners.BlockChainListener}, attach it to a {@link BlockChain} and then use the getters on the
      * confidence object to determine the new depth.</p>
      */
     public void addEventListener(Listener listener) {
@@ -334,7 +334,10 @@ public class TransactionConfidence {
         StringBuilder builder = new StringBuilder();
         int peers = numBroadcastPeers();
         if (peers > 0) {
-            builder.append("Seen by ").append(peers).append(peers > 1 ? " peers. " : " peer. ");
+            builder.append("Seen by ").append(peers).append(peers > 1 ? " peers" : " peer");
+            if (lastBroadcastedAt != null)
+                builder.append(" (most recently: ").append(Utils.dateTimeFormat(lastBroadcastedAt)).append(")");
+            builder.append(". ");
         }
         switch (getConfidenceType()) {
             case UNKNOWN:
@@ -354,6 +357,8 @@ public class TransactionConfidence {
                         getAppearedAtChainHeight(), getDepthInBlocks()));
                 break;
         }
+        if (source != Source.UNKNOWN)
+            builder.append(" Source: ").append(source);
         return builder.toString();
     }
 

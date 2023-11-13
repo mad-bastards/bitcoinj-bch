@@ -160,8 +160,18 @@ public class Peer extends PeerSocketHandler {
     private final SettableFuture<Peer> connectionOpenFuture = SettableFuture.create();
     private final SettableFuture<Peer> outgoingVersionHandshakeFuture = SettableFuture.create();
     private final SettableFuture<Peer> incomingVersionHandshakeFuture = SettableFuture.create();
-    private final ListenableFuture<List<Peer>> versionHandshakeFuture = Futures
-            .allAsList(outgoingVersionHandshakeFuture, incomingVersionHandshakeFuture);
+    private final ListenableFuture<Peer> versionHandshakeFuture = Futures.transform(
+            Futures.allAsList(outgoingVersionHandshakeFuture, incomingVersionHandshakeFuture),
+            new Function<List<Peer>, Peer>() {
+
+                @Override
+                @Nullable
+                public Peer apply(@Nullable List<Peer> peers) {
+                    checkNotNull(peers);
+                    checkState(peers.size() == 2 && peers.get(0) == peers.get(1));
+                    return peers.get(0);
+                }
+            });
 
     /**
      * <p>Construct a peer that reads/writes from the given block chain.</p>
@@ -436,7 +446,7 @@ public class Peer extends PeerSocketHandler {
         return connectionOpenFuture;
     }
 
-    public ListenableFuture<List<Peer>> getVersionHandshakeFuture() {
+    public ListenableFuture<Peer> getVersionHandshakeFuture() {
         return versionHandshakeFuture;
     }
 
@@ -554,6 +564,13 @@ public class Peer extends PeerSocketHandler {
             close();
             return;
         }
+        if ((vPeerVersionMessage.localServices
+                & VersionMessage.NODE_BITCOIN_CASH) != VersionMessage.NODE_BITCOIN_CASH) {
+            log.info("{}: Peer follows an incompatible block chain.", this);
+            // Shut down the channel gracefully.
+            close();
+            return;
+        }
         if (vPeerVersionMessage.bestHeight < 0)
             // In this case, it's a protocol violation.
             throw new ProtocolException("Peer reports invalid best height: " + vPeerVersionMessage.bestHeight);
@@ -633,9 +650,9 @@ public class Peer extends PeerSocketHandler {
     protected void processAlert(AlertMessage m) {
         try {
             if (m.isSignatureValid()) {
-                log.info("Received alert from peer {}: {}", this, m.getStatusBar());
+                log.debug("Received alert from peer {}: {}", this, m.getStatusBar());
             } else {
-                log.warn("Received alert with invalid signature from peer {}: {}", this, m.getStatusBar());
+                log.debug("Received alert with invalid signature from peer {}: {}", this, m.getStatusBar());
             }
         } catch (Throwable t) {
             // Signature checking can FAIL on Android platforms before Gingerbread apparently due to bugs in their
@@ -695,7 +712,9 @@ public class Peer extends PeerSocketHandler {
                 } else {
                     lock.lock();
                     try {
-                        log.info("Passed the fast catchup time, discarding {} headers and requesting full blocks",
+                        log.info(
+                                "Passed the fast catchup time ({}) at height {}, discarding {} headers and requesting full blocks",
+                                Utils.dateTimeFormat(fastCatchupTimeSecs * 1000), blockChain.getBestChainHeight() + 1,
                                 m.getBlockHeaders().size() - i);
                         this.downloadBlockBodies = true;
                         // Prevent this request being seen as a duplicate.
@@ -947,7 +966,7 @@ public class Peer extends PeerSocketHandler {
             // Start the operation.
             sendMessage(getdata);
         } catch (Exception e) {
-            log.error("{}: Couldn't send getdata in downloadDependencies({})", this, tx.getHash());
+            log.error("{}: Couldn't send getdata in downloadDependencies({})", this, tx.getHash(), e);
             resultFuture.setException(e);
             return resultFuture;
         } finally {

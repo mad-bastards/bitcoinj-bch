@@ -118,7 +118,7 @@ public class PaymentChannelV1ServerState extends PaymentChannelServerState {
      * @return Our signature that makes the refund transaction valid
      * @throws VerificationException If the transaction isnt valid or did not meet the requirements of a refund transaction.
      */
-    public synchronized byte[] provideRefundTransaction(Transaction refundTx, byte[] clientMultiSigPubKey) throws VerificationException {
+    public synchronized byte[] provideRefundTransaction(Transaction refundTx, Coin inputValue, byte[] clientMultiSigPubKey) throws VerificationException {
         checkNotNull(refundTx);
         checkNotNull(clientMultiSigPubKey);
         stateMachine.checkState(State.WAITING_FOR_REFUND_TRANSACTION);
@@ -147,7 +147,9 @@ public class PaymentChannelV1ServerState extends PaymentChannelServerState {
         Script multisigPubKey = ScriptBuilder.createMultiSigOutputScript(2, ImmutableList.of(clientKey, serverKey));
         // We are really only signing the fact that the transaction has a proper lock time and don't care about anything
         // else, so we sign SIGHASH_NONE and SIGHASH_ANYONECANPAY.
-        TransactionSignature sig = refundTx.calculateSignature(0, serverKey, multisigPubKey, Transaction.SigHash.NONE, true);
+        TransactionSignature sig = refundTx.getVersion() >= Transaction.FORKID_VERSION ?
+                refundTx.calculateWitnessSignature(0, serverKey, multisigPubKey, inputValue, Transaction.SigHash.NONE, true):
+                refundTx.calculateSignature(0, serverKey, multisigPubKey, Transaction.SigHash.NONE, true);
         log.info("Signed refund transaction.");
         this.clientOutput = refundTx.getOutput(0);
         stateMachine.transition(State.WAITING_FOR_MULTISIG_CONTRACT);
@@ -164,7 +166,10 @@ public class PaymentChannelV1ServerState extends PaymentChannelServerState {
 
     // Signs the first input of the transaction which must spend the multisig contract.
     private void signMultisigInput(Transaction tx, Transaction.SigHash hashType, boolean anyoneCanPay) {
-        TransactionSignature signature = tx.calculateSignature(0, serverKey, getContractScript(), hashType, anyoneCanPay);
+        //TransactionSignature signature = tx.calculateSignature(0, serverKey, getContractScript(), hashType, anyoneCanPay, true);
+        TransactionSignature signature = tx.getVersion() >= Transaction.FORKID_VERSION ?
+                tx.calculateWitnessSignature(0, serverKey, getContractScript(), tx.getInput(0).getConnectedOutput().getValue(), Transaction.SigHash.NONE, true):
+                tx.calculateSignature(0, serverKey, getContractScript(), hashType, true);
         byte[] mySig = signature.encodeToBitcoin();
         Script scriptSig = ScriptBuilder.createMultiSigInputScriptBytes(ImmutableList.of(bestValueSignature, mySig));
         tx.getInput(0).setScriptSig(scriptSig);
@@ -174,12 +179,13 @@ public class PaymentChannelV1ServerState extends PaymentChannelServerState {
     /**
      * <p>Closes this channel and broadcasts the highest value payment transaction on the network.</p>
      *
-     * <p>This will set the state to {@link State#CLOSED} if the transaction is successfully broadcast on the network.
-     * If we fail to broadcast for some reason, the state is set to {@link State#ERROR}.</p>
+     * <p>This will set the state to {@link PaymentChannelServerState.State#CLOSED} if the transaction is successfully
+     * broadcast on the network. If we fail to broadcast for some reason, the state is set to
+     * {@link PaymentChannelServerState.State#ERROR}.</p>
      *
-     * <p>If the current state is before {@link State#READY} (ie we have not finished initializing the channel), we
-     * simply set the state to {@link State#CLOSED} and let the client handle getting its refund transaction confirmed.
-     * </p>
+     * <p>If the current state is before {@link PaymentChannelServerState.State#READY} (ie we have not finished
+     * initializing the channel), we simply set the state to {@link PaymentChannelServerState.State#CLOSED} and let the
+     * client handle getting its refund transaction confirmed. </p>
      *
      * @return a future which completes when the provided multisig contract successfully broadcasts, or throws if the
      *         broadcast fails for some reason. Note that if the network simply rejects the transaction, this future
